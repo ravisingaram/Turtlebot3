@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+
+from collections import OrderedDict
+import rospy, threading
+import actionlib, json, rospkg, ast
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal, MoveBaseResult, MoveBaseFeedback
+from geometry_msgs.msg import PoseArray
+import sys, tty, termios
+stop_goals = False
+
+#create a ROS node for this program
+rospy.init_node("move_base_client")
+
+#Path for saving and retreiving the pose.csv file 
+output_file_path = rospkg.RosPack().get_path('follow_waypoints')+"/saved_path/poses.json"
+
+poseArray_publisher = rospy.Publisher('/waypoints', PoseArray, queue_size=10)
+
+def get_char():
+      fd = sys.stdin.fileno()
+      old_settings = termios.tcgetattr(fd)
+      try:
+         tty.setcbreak(sys.stdin.fileno())
+         ch = sys.stdin.read(1)
+      finally:
+         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+      return ch
+      
+def cancelgoal():
+	while not rospy.is_shutdown():
+		rospy.loginfo('saving waypoints')
+		c = get_char()
+		if c=='4':
+			client.cancel_goal()
+			global stop_goals
+			stop_goals = True
+			print("cancelled")
+
+input_thread = threading.Thread(target=cancelgoal)
+input_thread.start()
+
+def callback_feedback(feedback):
+	rospy.loginfo(feedback)
+	
+#create a ROS action client , which connects to action server
+client = actionlib.SimpleActionClient("/move_base", MoveBaseAction)
+rospy.loginfo(output_file_path)
+#wait until action server is on
+client.wait_for_server()
+
+
+#read poses from the file
+with open(output_file_path, 'r') as file:
+	data = json.load(file, object_pairs_hook=OrderedDict)
+	
+rospy.loginfo(data)
+
+#Parse the data values into a dictionary
+waypoints_dict=OrderedDict()
+for key, value in data.items():
+	result=ast.literal_eval(value)
+	waypoints_dict[key]=result
+
+def loop_thru_waypoints():
+
+	#Parse each waypoint in the dictionary into a MoveBaseGoal() object
+	for key,value in waypoints_dict.items():
+		rospy.loginfo(key)	
+		goal = MoveBaseGoal()
+		goal.target_pose.header.frame_id = 'map'
+		goal.target_pose.pose.position.x    =  float(value['position']['x'])
+		goal.target_pose.pose.position.y     = float (value['position']['y'])
+		goal.target_pose.pose.position.z     = float(value['position']['z'])
+		goal.target_pose.pose.orientation.x = float(value['orientation']['x'])
+		goal.target_pose.pose.orientation.y = float(value['orientation']['y'])
+		goal.target_pose.pose.orientation.z = float(value['orientation']['z'])
+		goal.target_pose.pose.orientation.w = float(value['orientation']['w'])
+
+			#send goal to move_base action server, specifying the feedback callback
+		client.send_goal(goal, feedback_cb = callback_feedback)
+		
+		#after sending goal, client can do other tasks
+		client.wait_for_result() #not doing anything if not planned waste time...
+		waypoints.append(goal)
+		
+def convert_to_PoseArray(waypoints):
+    """Used to publish waypoints as pose array so that you can see them in rviz, etc."""
+    poses = PoseArray()
+    poses.header.frame_id = rospy.get_param('~goal_frame_id','map')
+    poses.poses = [pose.target_pose.pose for pose in waypoints]
+    return poses
+    
+r = rospy.Rate(10)
+
+while not (rospy.is_shutdown() or stop_goals):
+	waypoints = []
+	loop_thru_waypoints()
+	poseArray_publisher.publish(convert_to_PoseArray(waypoints))
+	r.sleep()
+	
